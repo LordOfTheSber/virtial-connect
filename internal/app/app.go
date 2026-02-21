@@ -338,11 +338,18 @@ func (u *UI) runOnUI(fn func()) {
 }
 
 func (u *UI) applyLocalFilter() {
+	if u.localList == nil || u.localFind == nil {
+		return
+	}
 	q := strings.ToLower(strings.TrimSpace(u.localFind.Text))
 	normQ := normalizeSearch(q)
+	sortMode := "Name ↑"
+	if u.localSort != nil && u.localSort.Selected != "" {
+		sortMode = u.localSort.Selected
+	}
 	if q == "" {
 		u.localItems = append([]models.FileEntry(nil), u.allLocal...)
-		u.sortEntries(u.localItems, u.localSort.Selected)
+		u.sortEntries(u.localItems, sortMode)
 		u.localList.Refresh()
 		return
 	}
@@ -353,17 +360,24 @@ func (u *UI) applyLocalFilter() {
 			out = append(out, item)
 		}
 	}
-	u.sortEntries(out, u.localSort.Selected)
+	u.sortEntries(out, sortMode)
 	u.localItems = out
 	u.localList.Refresh()
 }
 
 func (u *UI) applyRemoteFilter() {
+	if u.remoteList == nil || u.remoteFind == nil {
+		return
+	}
 	q := strings.ToLower(strings.TrimSpace(u.remoteFind.Text))
 	normQ := normalizeSearch(q)
+	sortMode := "Name ↑"
+	if u.remoteSort != nil && u.remoteSort.Selected != "" {
+		sortMode = u.remoteSort.Selected
+	}
 	if q == "" {
 		u.remoteItems = append([]models.FileEntry(nil), u.allRemote...)
-		u.sortEntries(u.remoteItems, u.remoteSort.Selected)
+		u.sortEntries(u.remoteItems, sortMode)
 		u.remoteList.Refresh()
 		return
 	}
@@ -374,7 +388,7 @@ func (u *UI) applyRemoteFilter() {
 			out = append(out, item)
 		}
 	}
-	u.sortEntries(out, u.remoteSort.Selected)
+	u.sortEntries(out, sortMode)
 	u.remoteItems = out
 	u.remoteList.Refresh()
 }
