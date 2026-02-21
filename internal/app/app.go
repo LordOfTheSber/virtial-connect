@@ -1,0 +1,370 @@
+package app
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
+
+	"virtial-connect/internal/editor"
+	"virtial-connect/internal/logging"
+	"virtial-connect/internal/models"
+	"virtial-connect/internal/sshclient"
+	"virtial-connect/internal/transfer"
+	"virtial-connect/internal/util"
+)
+
+type UI struct {
+	app fyne.App
+	win fyne.Window
+
+	sshClient *sshclient.Client
+	transfer  *transfer.Manager
+	editor    *editor.Service
+	logger    *logging.Logger
+
+	hostEntry *widget.Entry
+	portEntry *widget.Entry
+	userEntry *widget.Entry
+	passEntry *widget.Entry
+	keyEntry  *widget.Entry
+	ppEntry   *widget.Entry
+
+	localPath   string
+	remotePath  string
+	localItems  []models.FileEntry
+	remoteItems []models.FileEntry
+
+	localList  *widget.List
+	remoteList *widget.List
+	logBox     *widget.Entry
+	queueList  *widget.List
+	queue      []models.TransferTask
+
+	selectedLocal  int
+	selectedRemote int
+	counter        atomic.Uint64
+}
+
+func New(a fyne.App) *UI {
+	u := &UI{app: a, sshClient: &sshclient.Client{}, localPath: mustLocalHome(), remotePath: "/", selectedLocal: -1, selectedRemote: -1}
+	u.win = a.NewWindow("Virtial Connect MVP")
+	u.win.Resize(fyne.NewSize(1400, 900))
+	u.logBox = widget.NewMultiLineEntry()
+	u.logBox.Disable()
+	u.logger = logging.New(func(line string) { u.app.Driver().RunOnMain(func() { u.logBox.SetText(u.logBox.Text + line + "\n") }) })
+	u.build()
+	u.refreshLocal()
+	return u
+}
+
+func (u *UI) Show() { u.win.ShowAndRun() }
+
+func mustLocalHome() string {
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return "C:\\"
+	}
+	return h
+}
+
+func (u *UI) build() {
+	u.hostEntry = widget.NewEntry()
+	u.hostEntry.SetPlaceHolder("host")
+	u.portEntry = widget.NewEntry()
+	u.portEntry.SetText("22")
+	u.userEntry = widget.NewEntry()
+	u.userEntry.SetPlaceHolder("username")
+	u.passEntry = widget.NewPasswordEntry()
+	u.passEntry.SetPlaceHolder("password")
+	u.keyEntry = widget.NewEntry()
+	u.keyEntry.SetPlaceHolder("private key path")
+	u.ppEntry = widget.NewPasswordEntry()
+	u.ppEntry.SetPlaceHolder("passphrase")
+
+	connectBtn := widget.NewButtonWithIcon("Connect", theme.ConfirmIcon(), u.onConnect)
+	disconnectBtn := widget.NewButtonWithIcon("Disconnect", theme.CancelIcon(), func() { u.sshClient.Disconnect(); u.logger.Info("Disconnected") })
+
+	conn := container.NewGridWithColumns(9,
+		u.hostEntry, u.portEntry, u.userEntry, u.passEntry, u.keyEntry, u.ppEntry,
+		connectBtn, disconnectBtn,
+	)
+
+	u.localList = widget.NewList(func() int { return len(u.localItems) }, func() fyne.CanvasObject { return widget.NewLabel("") },
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			o.(*widget.Label).SetText(formatEntry(u.localItems[i]))
+		})
+	u.localList.OnSelected = func(id widget.ListItemID) { u.selectedLocal = id }
+	u.localList.OnUnselected = func(widget.ListItemID) { u.selectedLocal = -1 }
+	u.localList.OnTappedSecondary = func(*fyne.PointEvent) { u.showLocalMenu() }
+
+	u.remoteList = widget.NewList(func() int { return len(u.remoteItems) }, func() fyne.CanvasObject { return widget.NewLabel("") },
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			o.(*widget.Label).SetText(formatEntry(u.remoteItems[i]))
+		})
+	u.remoteList.OnSelected = func(id widget.ListItemID) { u.selectedRemote = id }
+	u.remoteList.OnUnselected = func(widget.ListItemID) { u.selectedRemote = -1 }
+	u.remoteList.OnTappedSecondary = func(*fyne.PointEvent) { u.showRemoteMenu() }
+
+	localPathLabel := widget.NewLabel("Local")
+	remotePathLabel := widget.NewLabel("Remote")
+	localUp := widget.NewButton("..", func() { u.localPath = filepath.Dir(u.localPath); u.refreshLocal() })
+	remoteUp := widget.NewButton("..", func() {
+		u.remotePath = util.NormalizeRemotePath(filepath.ToSlash(filepath.Dir(u.remotePath)))
+		u.refreshRemote()
+	})
+
+	localPanel := container.NewBorder(container.NewBorder(nil, nil, localPathLabel, localUp, widget.NewLabelWithStyle(u.localPath, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})), nil, nil, nil, u.localList)
+	remotePanel := container.NewBorder(container.NewBorder(nil, nil, remotePathLabel, remoteUp, widget.NewLabelWithStyle(u.remotePath, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})), nil, nil, nil, u.remoteList)
+
+	filePanels := container.NewHSplit(localPanel, remotePanel)
+	filePanels.Offset = 0.5
+
+	u.queueList = widget.NewList(func() int { return len(u.queue) }, func() fyne.CanvasObject { return widget.NewLabel("") },
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			t := u.queue[i]
+			o.(*widget.Label).SetText(fmt.Sprintf("%s %s -> %s [%s] %d/%d speed %.1f KB/s ETA %s %s", t.ID, t.SourcePath, t.DestPath, t.Status, t.DoneBytes, t.TotalBytes, t.SpeedBps/1024, t.ETA.Truncate(time.Second), t.Error))
+		})
+
+	bottom := container.NewVSplit(container.NewBorder(widget.NewLabel("Transfer queue"), nil, nil, nil, u.queueList), container.NewBorder(widget.NewLabel("Logs"), nil, nil, nil, container.NewVScroll(u.logBox)))
+	bottom.Offset = 0.45
+
+	content := container.NewBorder(conn, bottom, nil, nil, filePanels)
+	u.win.SetContent(content)
+}
+
+func formatEntry(e models.FileEntry) string {
+	kind := "F"
+	if e.IsDir {
+		kind = "D"
+	}
+	if e.IsLink {
+		kind = "L"
+	}
+	return fmt.Sprintf("[%s] %-32s %12d %s %s", kind, e.Name, e.Size, e.ModTime.Format("2006-01-02 15:04"), e.Mode)
+}
+
+func (u *UI) onConnect() {
+	port, _ := strconv.Atoi(strings.TrimSpace(u.portEntry.Text))
+	cfgDir, _ := os.UserConfigDir()
+	err := u.sshClient.Connect(sshclient.ConnectConfig{
+		Host: strings.TrimSpace(u.hostEntry.Text), Port: port, Username: strings.TrimSpace(u.userEntry.Text),
+		Password: u.passEntry.Text, PrivateKey: strings.TrimSpace(u.keyEntry.Text), Passphrase: u.ppEntry.Text,
+		KnownHosts: filepath.Join(cfgDir, "virtial-connect", "known_hosts"), ConnectTimout: 8 * time.Second,
+		OnUnknownHost: func(host, fp string) (bool, error) {
+			ok := false
+			d := dialog.NewConfirm("Unknown host", fmt.Sprintf("%s fingerprint %s\nTrust this host?", host, fp), func(b bool) { ok = b }, u.win)
+			d.Show()
+			for d.Visible() {
+				time.Sleep(50 * time.Millisecond)
+			}
+			return ok, nil
+		},
+	})
+	if err != nil {
+		u.logger.Error("Connect failed: %v", err)
+		dialog.ShowError(err, u.win)
+		return
+	}
+	u.logger.Info("Connected to %s", u.hostEntry.Text)
+	u.transfer = transfer.New(transfer.NewSFTPFS(u.sshClient.SFTP()), 3, func(task models.TransferTask) {
+		u.app.Driver().RunOnMain(func() { u.upsertTask(task) })
+	})
+	u.editor = editor.New(u.sshClient.SFTP())
+	u.refreshRemote()
+}
+
+func (u *UI) refreshLocal() {
+	entries, err := os.ReadDir(u.localPath)
+	if err != nil {
+		u.logger.Error("local list: %v", err)
+		return
+	}
+	list := make([]models.FileEntry, 0, len(entries)+1)
+	if u.localPath != filepath.VolumeName(u.localPath)+`\` {
+		list = append(list, models.FileEntry{Name: "..", Path: filepath.Dir(u.localPath), IsDir: true})
+	}
+	for _, e := range entries {
+		info, _ := e.Info()
+		item := models.FileEntry{Name: e.Name(), Path: filepath.Join(u.localPath, e.Name()), IsDir: e.IsDir()}
+		if info != nil {
+			item.Size = info.Size()
+			item.ModTime = info.ModTime()
+			item.Mode = info.Mode().String()
+		}
+		list = append(list, item)
+	}
+	u.localItems = list
+	u.localList.Refresh()
+}
+
+func (u *UI) refreshRemote() {
+	if !u.sshClient.IsConnected() {
+		return
+	}
+	items, err := u.sshClient.ListRemote(u.remotePath)
+	if err != nil {
+		u.logger.Error("remote list: %v", err)
+		return
+	}
+	u.remoteItems = items
+	u.remoteList.Refresh()
+}
+
+func (u *UI) showLocalMenu() {
+	if u.selectedLocal < 0 || u.selectedLocal >= len(u.localItems) {
+		return
+	}
+	sel := u.localItems[u.selectedLocal]
+	if sel.Name == ".." {
+		u.localPath = sel.Path
+		u.refreshLocal()
+		return
+	}
+	if sel.IsDir {
+		u.localPath = sel.Path
+		u.refreshLocal()
+		return
+	}
+	if !u.sshClient.IsConnected() {
+		return
+	}
+	u.enqueue(models.Upload, sel.Path, util.JoinRemote(u.remotePath, sel.Name), sel.Size)
+}
+
+func (u *UI) showRemoteMenu() {
+	if u.selectedRemote < 0 || u.selectedRemote >= len(u.remoteItems) {
+		return
+	}
+	sel := u.remoteItems[u.selectedRemote]
+	if sel.Name == ".." {
+		u.remotePath = sel.Path
+		u.refreshRemote()
+		return
+	}
+	if sel.IsDir {
+		u.remotePath = sel.Path
+		u.refreshRemote()
+		return
+	}
+	menu := fyne.NewMenu("Remote",
+		fyne.NewMenuItem("Download", func() { u.enqueue(models.Download, sel.Path, filepath.Join(u.localPath, sel.Name), sel.Size) }),
+		fyne.NewMenuItem("Edit", func() { u.openEditor(sel) }),
+		fyne.NewMenuItem("Rename", func() { u.renameRemote(sel) }),
+		fyne.NewMenuItem("Delete", func() { u.deleteRemote(sel) }),
+	)
+	widget.ShowPopUpMenuAtPosition(menu, u.win.Canvas(), fyne.CurrentApp().Driver().AbsolutePositionForObject(u.remoteList))
+}
+
+func (u *UI) enqueue(direction models.TransferDirection, src, dst string, total int64) {
+	if u.transfer == nil {
+		return
+	}
+	id := fmt.Sprintf("task-%d", u.counter.Add(1))
+	u.transfer.Enqueue(&models.TransferTask{ID: id, Direction: direction, SourcePath: src, DestPath: dst, TotalBytes: total})
+}
+
+func (u *UI) upsertTask(task models.TransferTask) {
+	for i := range u.queue {
+		if u.queue[i].ID == task.ID {
+			u.queue[i] = task
+			u.queueList.Refresh()
+			return
+		}
+	}
+	u.queue = append(u.queue, task)
+	u.queueList.Refresh()
+	if task.Status == models.TransferCompleted && task.Direction == models.Download {
+		u.refreshLocal()
+	}
+	if task.Status == models.TransferCompleted && task.Direction == models.Upload {
+		u.refreshRemote()
+	}
+}
+
+func (u *UI) openEditor(item models.FileEntry) {
+	opened, content, err := u.editor.Open(item.Path, 10*1024*1024)
+	if err != nil {
+		dialog.ShowError(err, u.win)
+		return
+	}
+	w := u.app.NewWindow("Edit: " + item.Name)
+	text := widget.NewMultiLineEntry()
+	text.SetText(string(content))
+	if opened.ReadOnly {
+		text.Disable()
+	}
+	search := widget.NewEntry()
+	repl := widget.NewEntry()
+	findBtn := widget.NewButton("Find next", func() {
+		idx := strings.Index(text.Text, search.Text)
+		if idx >= 0 {
+			dialog.ShowInformation("Find", fmt.Sprintf("Found at position %d", idx), w)
+		}
+	})
+	replaceBtn := widget.NewButton("Replace all", func() { text.SetText(strings.ReplaceAll(text.Text, search.Text, repl.Text)) })
+	saveBtn := widget.NewButton("Save", func() {
+		err := u.editor.SaveAtomic(opened, []byte(text.Text), false)
+		if err != nil {
+			if strings.Contains(err.Error(), "changed") {
+				dialog.ShowConfirm("Conflict", "File changed remotely. Overwrite?", func(ok bool) {
+					if ok {
+						_ = u.editor.SaveAtomic(opened, []byte(text.Text), true)
+					}
+				}, w)
+				return
+			}
+			dialog.ShowError(err, w)
+			return
+		}
+		dialog.ShowInformation("Saved", "File saved atomically", w)
+	})
+	toolbar := container.NewGridWithColumns(6, widget.NewLabel("Mode: "+editor.BasicSyntaxHint(item.Name)), search, repl, findBtn, replaceBtn, saveBtn)
+	w.SetContent(container.NewBorder(toolbar, nil, nil, nil, text))
+	w.Resize(fyne.NewSize(800, 600))
+	w.Show()
+}
+
+func (u *UI) renameRemote(item models.FileEntry) {
+	entry := widget.NewEntry()
+	entry.SetText(item.Name)
+	dialog.ShowForm("Rename", "OK", "Cancel", []*widget.FormItem{{Text: "New name", Widget: entry}}, func(ok bool) {
+		if !ok {
+			return
+		}
+		newPath := util.JoinRemote(u.remotePath, entry.Text)
+		if err := u.sshClient.SFTP().Rename(item.Path, newPath); err != nil {
+			dialog.ShowError(err, u.win)
+			return
+		}
+		u.refreshRemote()
+	}, u.win)
+}
+
+func (u *UI) deleteRemote(item models.FileEntry) {
+	dialog.ShowConfirm("Delete", "Delete "+item.Name+"?", func(ok bool) {
+		if !ok {
+			return
+		}
+		var err error
+		if item.IsDir {
+			err = u.sshClient.SFTP().RemoveDirectory(item.Path)
+		} else {
+			err = u.sshClient.SFTP().Remove(item.Path)
+		}
+		if err != nil {
+			dialog.ShowError(err, u.win)
+			return
+		}
+		u.refreshRemote()
+	}, u.win)
+}
