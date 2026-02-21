@@ -81,8 +81,10 @@ func New(a fyne.App) *UI {
 	u.win.Resize(fyne.NewSize(1400, 900))
 	u.logBox = widget.NewMultiLineEntry()
 	u.logBox.Disable()
+	u.logBox.SetMinRowsVisible(8)
 	u.consoleOut = widget.NewMultiLineEntry()
 	u.consoleOut.Disable()
+	u.consoleOut.SetMinRowsVisible(14)
 	u.logger = logging.New(func(line string) { u.runOnUI(func() { u.logBox.SetText(u.logBox.Text + line + "\n") }) })
 	if st, err := config.NewStore(); err == nil {
 		u.store = st
@@ -142,7 +144,7 @@ func (u *UI) build() {
 	u.reloadProfileSelect()
 
 	connectBtn := widget.NewButtonWithIcon("Connect", theme.ConfirmIcon(), u.onConnect)
-	disconnectBtn := widget.NewButtonWithIcon("Disconnect", theme.CancelIcon(), func() { u.sshClient.Disconnect(); u.logger.Info("Disconnected") })
+	disconnectBtn := widget.NewButtonWithIcon("Disconnect", theme.CancelIcon(), u.onDisconnect)
 
 	conn := container.NewGridWithColumns(10,
 		u.profile, u.hostEntry, u.portEntry, u.userEntry, u.passEntry, u.keyEntry, u.ppEntry,
@@ -211,9 +213,9 @@ func (u *UI) build() {
 		container.NewVScroll(u.consoleOut),
 	)
 	logsAndConsole := container.NewVSplit(container.NewBorder(widget.NewLabel("Logs"), nil, nil, nil, container.NewVScroll(u.logBox)), container.NewBorder(widget.NewLabel("Remote console"), nil, nil, nil, consolePanel))
-	logsAndConsole.Offset = 0.45
+	logsAndConsole.Offset = 0.25
 	bottom := container.NewVSplit(container.NewBorder(widget.NewLabel("Transfer queue"), nil, nil, nil, u.queueList), logsAndConsole)
-	bottom.Offset = 0.45
+	bottom.Offset = 0.30
 
 	content := container.NewBorder(conn, bottom, nil, nil, filePanels)
 	u.win.SetContent(content)
@@ -269,6 +271,16 @@ func (u *UI) onConnect() {
 		u.saveCurrentProfile()
 		u.runOnUI(func() { u.refreshRemote() })
 	}()
+}
+
+func (u *UI) onDisconnect() {
+	u.sshClient.Disconnect()
+	u.remoteItems = nil
+	u.allRemote = nil
+	u.remoteList.Refresh()
+	u.consoleOut.SetText(u.consoleOut.Text + "Disconnected\n")
+	u.logger.Info("Disconnected")
+	dialog.ShowInformation("Disconnected", "SSH/SFTP session closed", u.win)
 }
 
 func (u *UI) refreshLocal() {
