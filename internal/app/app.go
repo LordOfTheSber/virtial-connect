@@ -81,10 +81,8 @@ func New(a fyne.App) *UI {
 	u.win.Resize(fyne.NewSize(1400, 900))
 	u.logBox = widget.NewMultiLineEntry()
 	u.logBox.Disable()
-	u.logBox.SetMinRowsVisible(8)
 	u.consoleOut = widget.NewMultiLineEntry()
 	u.consoleOut.Disable()
-	u.consoleOut.SetMinRowsVisible(14)
 	u.logger = logging.New(func(line string) { u.runOnUI(func() { u.logBox.SetText(u.logBox.Text + line + "\n") }) })
 	if st, err := config.NewStore(); err == nil {
 		u.store = st
@@ -210,12 +208,15 @@ func (u *UI) build() {
 		nil,
 		nil,
 		nil,
-		container.NewVScroll(u.consoleOut),
+		u.consoleOut,
 	)
-	logsAndConsole := container.NewVSplit(container.NewBorder(widget.NewLabel("Logs"), nil, nil, nil, container.NewVScroll(u.logBox)), container.NewBorder(widget.NewLabel("Remote console"), nil, nil, nil, consolePanel))
-	logsAndConsole.Offset = 0.25
+	logsAndConsole := container.NewVSplit(
+		container.NewBorder(widget.NewLabel("Logs (drag splitter below to resize)"), nil, nil, nil, u.logBox),
+		container.NewBorder(widget.NewLabel("Remote console (drag splitter to resize)"), nil, nil, nil, consolePanel),
+	)
+	logsAndConsole.Offset = 0.18
 	bottom := container.NewVSplit(container.NewBorder(widget.NewLabel("Transfer queue"), nil, nil, nil, u.queueList), logsAndConsole)
-	bottom.Offset = 0.30
+	bottom.Offset = 0.22
 
 	content := container.NewBorder(conn, bottom, nil, nil, filePanels)
 	u.win.SetContent(content)
