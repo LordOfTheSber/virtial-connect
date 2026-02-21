@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -47,6 +48,8 @@ type UI struct {
 	profile    *widget.Select
 	localFind  *widget.Entry
 	remoteFind *widget.Entry
+	localSort  *widget.Select
+	remoteSort *widget.Select
 
 	localPath   string
 	remotePath  string
@@ -124,6 +127,10 @@ func (u *UI) build() {
 	u.remoteFind = widget.NewEntry()
 	u.remoteFind.SetPlaceHolder("Search remote...")
 	u.remoteFind.OnChanged = func(_ string) { u.applyRemoteFilter() }
+	u.localSort = widget.NewSelect([]string{"Name ↑", "Name ↓", "Updated ↑", "Updated ↓"}, func(string) { u.applyLocalFilter() })
+	u.localSort.SetSelected("Name ↑")
+	u.remoteSort = widget.NewSelect([]string{"Name ↑", "Name ↓", "Updated ↑", "Updated ↓"}, func(string) { u.applyRemoteFilter() })
+	u.remoteSort.SetSelected("Name ↑")
 	u.profile = widget.NewSelect(nil, func(name string) { u.applyProfile(name) })
 	u.reloadProfileSelect()
 
@@ -169,7 +176,7 @@ func (u *UI) build() {
 		widget.NewButton("Open/Up", u.showLocalMenu),
 		widget.NewButton("Upload", func() { u.uploadSelectedLocal(false) }),
 	)
-	localPanel := container.NewBorder(container.NewBorder(u.localFind, localActions, localPathLabel, localUp, widget.NewLabelWithStyle(u.localPath, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})), nil, nil, nil, u.localList)
+	localPanel := container.NewBorder(container.NewBorder(container.NewVBox(u.localFind, u.localSort), localActions, localPathLabel, localUp, widget.NewLabelWithStyle(u.localPath, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})), nil, nil, nil, u.localList)
 	remoteActions := container.NewGridWithColumns(5,
 		widget.NewButton("Open/Up", u.showRemoteMenu),
 		widget.NewButton("Download", func() { u.downloadSelectedRemote() }),
@@ -177,7 +184,7 @@ func (u *UI) build() {
 		widget.NewButton("Rename", func() { u.renameSelectedRemote() }),
 		widget.NewButton("Delete", func() { u.deleteSelectedRemote() }),
 	)
-	remotePanel := container.NewBorder(container.NewBorder(u.remoteFind, remoteActions, remotePathLabel, remoteUp, widget.NewLabelWithStyle(u.remotePath, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})), nil, nil, nil, u.remoteList)
+	remotePanel := container.NewBorder(container.NewBorder(container.NewVBox(u.remoteFind, u.remoteSort), remoteActions, remotePathLabel, remoteUp, widget.NewLabelWithStyle(u.remotePath, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})), nil, nil, nil, u.remoteList)
 
 	filePanels := container.NewHSplit(localPanel, remotePanel)
 	filePanels.Offset = 0.5
@@ -203,7 +210,7 @@ func formatEntry(e models.FileEntry) string {
 	if e.IsLink {
 		kind = "L"
 	}
-	return fmt.Sprintf("[%s] %-32s %12d %s %s", kind, e.Name, e.Size, e.ModTime.Format("2006-01-02 15:04"), e.Mode)
+	return fmt.Sprintf("[%s] %-32s %12d %s %s", kind, e.Name, e.Size, e.ModTime.Format("02.01.2006"), e.Mode)
 }
 
 func (u *UI) onConnect() {
@@ -334,7 +341,8 @@ func (u *UI) applyLocalFilter() {
 	q := strings.ToLower(strings.TrimSpace(u.localFind.Text))
 	normQ := normalizeSearch(q)
 	if q == "" {
-		u.localItems = u.allLocal
+		u.localItems = append([]models.FileEntry(nil), u.allLocal...)
+		u.sortEntries(u.localItems, u.localSort.Selected)
 		u.localList.Refresh()
 		return
 	}
@@ -345,6 +353,7 @@ func (u *UI) applyLocalFilter() {
 			out = append(out, item)
 		}
 	}
+	u.sortEntries(out, u.localSort.Selected)
 	u.localItems = out
 	u.localList.Refresh()
 }
@@ -353,7 +362,8 @@ func (u *UI) applyRemoteFilter() {
 	q := strings.ToLower(strings.TrimSpace(u.remoteFind.Text))
 	normQ := normalizeSearch(q)
 	if q == "" {
-		u.remoteItems = u.allRemote
+		u.remoteItems = append([]models.FileEntry(nil), u.allRemote...)
+		u.sortEntries(u.remoteItems, u.remoteSort.Selected)
 		u.remoteList.Refresh()
 		return
 	}
@@ -364,8 +374,30 @@ func (u *UI) applyRemoteFilter() {
 			out = append(out, item)
 		}
 	}
+	u.sortEntries(out, u.remoteSort.Selected)
 	u.remoteItems = out
 	u.remoteList.Refresh()
+}
+
+func (u *UI) sortEntries(items []models.FileEntry, mode string) {
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Name == ".." {
+			return true
+		}
+		if items[j].Name == ".." {
+			return false
+		}
+		switch mode {
+		case "Name ↓":
+			return strings.ToLower(items[i].Name) > strings.ToLower(items[j].Name)
+		case "Updated ↑":
+			return items[i].ModTime.Before(items[j].ModTime)
+		case "Updated ↓":
+			return items[i].ModTime.After(items[j].ModTime)
+		default:
+			return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+		}
+	})
 }
 
 func (u *UI) handleLocalDoubleTap(id int) {
