@@ -72,12 +72,34 @@ func (s *Service) SaveAtomic(f *OpenedFile, content []byte, force bool) error {
 	if err := wf.Close(); err != nil {
 		return err
 	}
-	if err := s.sftp.Rename(tmpRemote, f.RemotePath); err != nil {
+	if err := s.renameWithFallback(tmpRemote, f.RemotePath); err != nil {
 		_ = s.sftp.Remove(tmpRemote)
 		return err
 	}
 	f.OriginalMTime = time.Now()
 	return nil
+}
+
+func (s *Service) renameWithFallback(src, dst string) error {
+	// Many SFTP servers support OpenSSH posix-rename extension (atomic overwrite).
+	if err := s.sftp.PosixRename(src, dst); err == nil {
+		return nil
+	}
+
+	// Fallback for servers without extension support.
+	if err := s.sftp.Rename(src, dst); err == nil {
+		return nil
+	} else {
+		// Some servers return SSH_FX_FAILURE when destination exists.
+		if _, statErr := s.sftp.Stat(dst); statErr == nil {
+			if rmErr := s.sftp.Remove(dst); rmErr == nil {
+				if retryErr := s.sftp.Rename(src, dst); retryErr == nil {
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("rename temp file to destination failed: %w", err)
+	}
 }
 
 func BasicSyntaxHint(name string) string {
