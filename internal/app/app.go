@@ -142,8 +142,9 @@ func (u *UI) build() {
 	u.localList.OnSelected = func(id widget.ListItemID) {
 		u.selectedLocal = id
 		u.handleLocalDoubleTap(id)
+		u.localList.Unselect(id)
 	}
-	u.localList.OnUnselected = func(widget.ListItemID) { u.selectedLocal = -1 }
+	u.localList.OnUnselected = func(widget.ListItemID) {}
 
 	u.remoteList = widget.NewList(func() int { return len(u.remoteItems) }, func() fyne.CanvasObject { return widget.NewLabel("") },
 		func(i widget.ListItemID, o fyne.CanvasObject) {
@@ -152,8 +153,9 @@ func (u *UI) build() {
 	u.remoteList.OnSelected = func(id widget.ListItemID) {
 		u.selectedRemote = id
 		u.handleRemoteDoubleTap(id)
+		u.remoteList.Unselect(id)
 	}
-	u.remoteList.OnUnselected = func(widget.ListItemID) { u.selectedRemote = -1 }
+	u.remoteList.OnUnselected = func(widget.ListItemID) {}
 
 	localPathLabel := widget.NewLabel("Local")
 	remotePathLabel := widget.NewLabel("Remote")
@@ -330,6 +332,7 @@ func (u *UI) runOnUI(fn func()) {
 
 func (u *UI) applyLocalFilter() {
 	q := strings.ToLower(strings.TrimSpace(u.localFind.Text))
+	normQ := normalizeSearch(q)
 	if q == "" {
 		u.localItems = u.allLocal
 		u.localList.Refresh()
@@ -337,7 +340,8 @@ func (u *UI) applyLocalFilter() {
 	}
 	out := make([]models.FileEntry, 0, len(u.allLocal))
 	for _, item := range u.allLocal {
-		if item.Name == ".." || strings.Contains(strings.ToLower(item.Name), q) {
+		name := strings.ToLower(item.Name)
+		if item.Name == ".." || strings.Contains(name, q) || strings.Contains(normalizeSearch(name), normQ) {
 			out = append(out, item)
 		}
 	}
@@ -347,6 +351,7 @@ func (u *UI) applyLocalFilter() {
 
 func (u *UI) applyRemoteFilter() {
 	q := strings.ToLower(strings.TrimSpace(u.remoteFind.Text))
+	normQ := normalizeSearch(q)
 	if q == "" {
 		u.remoteItems = u.allRemote
 		u.remoteList.Refresh()
@@ -354,7 +359,8 @@ func (u *UI) applyRemoteFilter() {
 	}
 	out := make([]models.FileEntry, 0, len(u.allRemote))
 	for _, item := range u.allRemote {
-		if item.Name == ".." || strings.Contains(strings.ToLower(item.Name), q) {
+		name := strings.ToLower(item.Name)
+		if item.Name == ".." || strings.Contains(name, q) || strings.Contains(normalizeSearch(name), normQ) {
 			out = append(out, item)
 		}
 	}
@@ -367,7 +373,7 @@ func (u *UI) handleLocalDoubleTap(id int) {
 		return
 	}
 	now := time.Now()
-	if u.lastLocalTapID == id && now.Sub(u.lastLocalTap) < 450*time.Millisecond {
+	if u.lastLocalTapID == id && now.Sub(u.lastLocalTap) < 700*time.Millisecond {
 		item := u.localItems[id]
 		if item.IsDir || item.Name == ".." {
 			u.localPath = item.Path
@@ -385,7 +391,7 @@ func (u *UI) handleRemoteDoubleTap(id int) {
 		return
 	}
 	now := time.Now()
-	if u.lastRemoteTapID == id && now.Sub(u.lastRemoteTap) < 450*time.Millisecond {
+	if u.lastRemoteTapID == id && now.Sub(u.lastRemoteTap) < 700*time.Millisecond {
 		item := u.remoteItems[id]
 		if item.IsDir || item.Name == ".." {
 			u.remotePath = item.Path
@@ -411,6 +417,17 @@ func (u *UI) openLocalFile(path string) {
 	if err := cmd.Start(); err != nil {
 		u.logger.Error("open local file: %v", err)
 	}
+}
+
+func normalizeSearch(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func (u *UI) reloadProfileSelect() {
