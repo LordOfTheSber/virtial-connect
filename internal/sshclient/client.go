@@ -123,7 +123,7 @@ func (c *Client) hostKeyCallback(cfg ConnectConfig) (ssh.HostKeyCallback, error)
 			return writeErr
 		}
 		return nil
-	}
+	}, nil
 }
 
 func md5Fingerprint(key ssh.PublicKey) string {

@@ -24,7 +24,14 @@ type RemoteFS interface {
 
 type sftpFS struct{ c *sftp.Client }
 
-type sftpWalker struct{ w *sftp.Walker }
+type sftpWalkImpl interface {
+	Step() bool
+	Err() error
+	Path() string
+	Stat() os.FileInfo
+}
+
+type sftpWalker struct{ w sftpWalkImpl }
 
 func NewSFTPFS(c *sftp.Client) RemoteFS                   { return &sftpFS{c: c} }
 func (s *sftpFS) Stat(p string) (os.FileInfo, error)      { return s.c.Stat(p) }
