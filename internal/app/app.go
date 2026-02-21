@@ -3,7 +3,9 @@ package app
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -15,9 +17,11 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"virtial-connect/internal/config"
 	"virtial-connect/internal/editor"
 	"virtial-connect/internal/logging"
 	"virtial-connect/internal/models"
+	"virtial-connect/internal/security"
 	"virtial-connect/internal/sshclient"
 	"virtial-connect/internal/transfer"
 	"virtial-connect/internal/util"
@@ -31,16 +35,23 @@ type UI struct {
 	transfer  *transfer.Manager
 	editor    *editor.Service
 	logger    *logging.Logger
+	store     *config.Store
+	settings  *config.Settings
 
-	hostEntry *widget.Entry
-	portEntry *widget.Entry
-	userEntry *widget.Entry
-	passEntry *widget.Entry
-	keyEntry  *widget.Entry
-	ppEntry   *widget.Entry
+	hostEntry  *widget.Entry
+	portEntry  *widget.Entry
+	userEntry  *widget.Entry
+	passEntry  *widget.Entry
+	keyEntry   *widget.Entry
+	ppEntry    *widget.Entry
+	profile    *widget.Select
+	localFind  *widget.Entry
+	remoteFind *widget.Entry
 
 	localPath   string
 	remotePath  string
+	allLocal    []models.FileEntry
+	allRemote   []models.FileEntry
 	localItems  []models.FileEntry
 	remoteItems []models.FileEntry
 
@@ -50,9 +61,13 @@ type UI struct {
 	queueList  *widget.List
 	queue      []models.TransferTask
 
-	selectedLocal  int
-	selectedRemote int
-	counter        atomic.Uint64
+	selectedLocal   int
+	selectedRemote  int
+	lastLocalTapID  int
+	lastRemoteTapID int
+	lastLocalTap    time.Time
+	lastRemoteTap   time.Time
+	counter         atomic.Uint64
 }
 
 func New(a fyne.App) *UI {
@@ -62,6 +77,13 @@ func New(a fyne.App) *UI {
 	u.logBox = widget.NewMultiLineEntry()
 	u.logBox.Disable()
 	u.logger = logging.New(func(line string) { u.runOnUI(func() { u.logBox.SetText(u.logBox.Text + line + "\n") }) })
+	if st, err := config.NewStore(); err == nil {
+		u.store = st
+		u.settings, _ = st.Load()
+	}
+	if u.settings == nil {
+		u.settings = &config.Settings{}
+	}
 	u.build()
 	return u
 }
@@ -96,12 +118,20 @@ func (u *UI) build() {
 	u.keyEntry.SetPlaceHolder("private key path")
 	u.ppEntry = widget.NewPasswordEntry()
 	u.ppEntry.SetPlaceHolder("passphrase")
+	u.localFind = widget.NewEntry()
+	u.localFind.SetPlaceHolder("Search local...")
+	u.localFind.OnChanged = func(_ string) { u.applyLocalFilter() }
+	u.remoteFind = widget.NewEntry()
+	u.remoteFind.SetPlaceHolder("Search remote...")
+	u.remoteFind.OnChanged = func(_ string) { u.applyRemoteFilter() }
+	u.profile = widget.NewSelect(nil, func(name string) { u.applyProfile(name) })
+	u.reloadProfileSelect()
 
 	connectBtn := widget.NewButtonWithIcon("Connect", theme.ConfirmIcon(), u.onConnect)
 	disconnectBtn := widget.NewButtonWithIcon("Disconnect", theme.CancelIcon(), func() { u.sshClient.Disconnect(); u.logger.Info("Disconnected") })
 
-	conn := container.NewGridWithColumns(9,
-		u.hostEntry, u.portEntry, u.userEntry, u.passEntry, u.keyEntry, u.ppEntry,
+	conn := container.NewGridWithColumns(10,
+		u.profile, u.hostEntry, u.portEntry, u.userEntry, u.passEntry, u.keyEntry, u.ppEntry,
 		connectBtn, disconnectBtn,
 	)
 
@@ -109,14 +139,20 @@ func (u *UI) build() {
 		func(i widget.ListItemID, o fyne.CanvasObject) {
 			o.(*widget.Label).SetText(formatEntry(u.localItems[i]))
 		})
-	u.localList.OnSelected = func(id widget.ListItemID) { u.selectedLocal = id }
+	u.localList.OnSelected = func(id widget.ListItemID) {
+		u.selectedLocal = id
+		u.handleLocalDoubleTap(id)
+	}
 	u.localList.OnUnselected = func(widget.ListItemID) { u.selectedLocal = -1 }
 
 	u.remoteList = widget.NewList(func() int { return len(u.remoteItems) }, func() fyne.CanvasObject { return widget.NewLabel("") },
 		func(i widget.ListItemID, o fyne.CanvasObject) {
 			o.(*widget.Label).SetText(formatEntry(u.remoteItems[i]))
 		})
-	u.remoteList.OnSelected = func(id widget.ListItemID) { u.selectedRemote = id }
+	u.remoteList.OnSelected = func(id widget.ListItemID) {
+		u.selectedRemote = id
+		u.handleRemoteDoubleTap(id)
+	}
 	u.remoteList.OnUnselected = func(widget.ListItemID) { u.selectedRemote = -1 }
 
 	localPathLabel := widget.NewLabel("Local")
@@ -131,7 +167,7 @@ func (u *UI) build() {
 		widget.NewButton("Open/Up", u.showLocalMenu),
 		widget.NewButton("Upload", func() { u.uploadSelectedLocal(false) }),
 	)
-	localPanel := container.NewBorder(container.NewBorder(nil, localActions, localPathLabel, localUp, widget.NewLabelWithStyle(u.localPath, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})), nil, nil, nil, u.localList)
+	localPanel := container.NewBorder(container.NewBorder(u.localFind, localActions, localPathLabel, localUp, widget.NewLabelWithStyle(u.localPath, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})), nil, nil, nil, u.localList)
 	remoteActions := container.NewGridWithColumns(5,
 		widget.NewButton("Open/Up", u.showRemoteMenu),
 		widget.NewButton("Download", func() { u.downloadSelectedRemote() }),
@@ -139,7 +175,7 @@ func (u *UI) build() {
 		widget.NewButton("Rename", func() { u.renameSelectedRemote() }),
 		widget.NewButton("Delete", func() { u.deleteSelectedRemote() }),
 	)
-	remotePanel := container.NewBorder(container.NewBorder(nil, remoteActions, remotePathLabel, remoteUp, widget.NewLabelWithStyle(u.remotePath, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})), nil, nil, nil, u.remoteList)
+	remotePanel := container.NewBorder(container.NewBorder(u.remoteFind, remoteActions, remotePathLabel, remoteUp, widget.NewLabelWithStyle(u.remotePath, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})), nil, nil, nil, u.remoteList)
 
 	filePanels := container.NewHSplit(localPanel, remotePanel)
 	filePanels.Offset = 0.5
@@ -204,6 +240,7 @@ func (u *UI) onConnect() {
 			u.runOnUI(func() { u.upsertTask(task) })
 		})
 		u.editor = editor.New(u.sshClient.SFTP())
+		u.saveCurrentProfile()
 		u.runOnUI(func() { u.refreshRemote() })
 	}()
 }
@@ -229,7 +266,8 @@ func (u *UI) refreshLocal() {
 		list = append(list, item)
 	}
 	u.localItems = list
-	u.localList.Refresh()
+	u.allLocal = list
+	u.applyLocalFilter()
 }
 
 func (u *UI) refreshRemote() {
@@ -241,8 +279,8 @@ func (u *UI) refreshRemote() {
 		u.logger.Error("remote list: %v", err)
 		return
 	}
-	u.remoteItems = items
-	u.remoteList.Refresh()
+	u.allRemote = items
+	u.applyRemoteFilter()
 }
 
 func (u *UI) showLocalMenu() {
@@ -288,6 +326,172 @@ func (u *UI) runOnUI(fn func()) {
 	if fn != nil {
 		fn()
 	}
+}
+
+func (u *UI) applyLocalFilter() {
+	q := strings.ToLower(strings.TrimSpace(u.localFind.Text))
+	if q == "" {
+		u.localItems = u.allLocal
+		u.localList.Refresh()
+		return
+	}
+	out := make([]models.FileEntry, 0, len(u.allLocal))
+	for _, item := range u.allLocal {
+		if item.Name == ".." || strings.Contains(strings.ToLower(item.Name), q) {
+			out = append(out, item)
+		}
+	}
+	u.localItems = out
+	u.localList.Refresh()
+}
+
+func (u *UI) applyRemoteFilter() {
+	q := strings.ToLower(strings.TrimSpace(u.remoteFind.Text))
+	if q == "" {
+		u.remoteItems = u.allRemote
+		u.remoteList.Refresh()
+		return
+	}
+	out := make([]models.FileEntry, 0, len(u.allRemote))
+	for _, item := range u.allRemote {
+		if item.Name == ".." || strings.Contains(strings.ToLower(item.Name), q) {
+			out = append(out, item)
+		}
+	}
+	u.remoteItems = out
+	u.remoteList.Refresh()
+}
+
+func (u *UI) handleLocalDoubleTap(id int) {
+	if id < 0 || id >= len(u.localItems) {
+		return
+	}
+	now := time.Now()
+	if u.lastLocalTapID == id && now.Sub(u.lastLocalTap) < 450*time.Millisecond {
+		item := u.localItems[id]
+		if item.IsDir || item.Name == ".." {
+			u.localPath = item.Path
+			u.refreshLocal()
+		} else {
+			u.openLocalFile(item.Path)
+		}
+	}
+	u.lastLocalTapID = id
+	u.lastLocalTap = now
+}
+
+func (u *UI) handleRemoteDoubleTap(id int) {
+	if id < 0 || id >= len(u.remoteItems) {
+		return
+	}
+	now := time.Now()
+	if u.lastRemoteTapID == id && now.Sub(u.lastRemoteTap) < 450*time.Millisecond {
+		item := u.remoteItems[id]
+		if item.IsDir || item.Name == ".." {
+			u.remotePath = item.Path
+			u.refreshRemote()
+		} else if u.editor != nil {
+			u.openEditor(item)
+		}
+	}
+	u.lastRemoteTapID = id
+	u.lastRemoteTap = now
+}
+
+func (u *UI) openLocalFile(path string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("cmd", "/C", "start", "", path)
+	case "darwin":
+		cmd = exec.Command("open", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+	if err := cmd.Start(); err != nil {
+		u.logger.Error("open local file: %v", err)
+	}
+}
+
+func (u *UI) reloadProfileSelect() {
+	if u.profile == nil || u.settings == nil {
+		return
+	}
+	options := make([]string, 0, len(u.settings.Profiles))
+	for _, p := range u.settings.Profiles {
+		if p.Name != "" {
+			options = append(options, p.Name)
+		}
+	}
+	u.profile.Options = options
+	u.profile.Refresh()
+}
+
+func (u *UI) applyProfile(name string) {
+	for _, p := range u.settings.Profiles {
+		if p.Name != name {
+			continue
+		}
+		u.hostEntry.SetText(p.Host)
+		u.portEntry.SetText(strconv.Itoa(p.Port))
+		u.userEntry.SetText(p.Username)
+		u.keyEntry.SetText(p.PrivateKeyPath)
+		if dec, err := security.DecryptString(p.PasswordEnc); err == nil {
+			u.passEntry.SetText(dec)
+		}
+		if dec, err := security.DecryptString(p.PassphraseEnc); err == nil {
+			u.ppEntry.SetText(dec)
+		}
+		if p.LastLocalPath != "" {
+			u.localPath = p.LastLocalPath
+			u.refreshLocal()
+		}
+		if p.LastRemotePath != "" {
+			u.remotePath = p.LastRemotePath
+		}
+		break
+	}
+}
+
+func (u *UI) saveCurrentProfile() {
+	if u.store == nil || u.settings == nil {
+		return
+	}
+	name := strings.TrimSpace(fmt.Sprintf("%s@%s:%s", u.userEntry.Text, u.hostEntry.Text, u.portEntry.Text))
+	port, _ := strconv.Atoi(strings.TrimSpace(u.portEntry.Text))
+	passEnc, _ := security.EncryptString(u.passEntry.Text)
+	phraseEnc, _ := security.EncryptString(u.ppEntry.Text)
+	p := models.ConnectionProfile{
+		Name:            name,
+		Host:            strings.TrimSpace(u.hostEntry.Text),
+		Port:            port,
+		Username:        strings.TrimSpace(u.userEntry.Text),
+		PrivateKeyPath:  strings.TrimSpace(u.keyEntry.Text),
+		PasswordEnc:     passEnc,
+		PassphraseEnc:   phraseEnc,
+		LastLocalPath:   u.localPath,
+		LastRemotePath:  u.remotePath,
+		LastConnectedAt: time.Now(),
+	}
+	replaced := false
+	for i := range u.settings.Profiles {
+		if u.settings.Profiles[i].Name == p.Name {
+			u.settings.Profiles[i] = p
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		u.settings.Profiles = append(u.settings.Profiles, p)
+	}
+	if err := u.store.Save(u.settings); err != nil {
+		u.logger.Error("save profiles: %v", err)
+		return
+	}
+	u.runOnUI(func() {
+		u.reloadProfileSelect()
+		u.profile.SetSelected(p.Name)
+	})
 }
 
 func (u *UI) selectedLocalItem() (models.FileEntry, bool) {

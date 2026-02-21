@@ -57,6 +57,9 @@ README.md
 - [x] SSH/SFTP connect (host/port/user/password/private key/passphrase).
 - [x] Remote SFTP listing: name/size/date/permissions, directories and parent `..`.
 - [x] Local FS panel listing.
+- [x] Double click on item: open directory / open file (remote opens editor, local opens via OS default app).
+- [x] Search by file/directory name in local and remote panels.
+- [x] Connection profile history persisted in local settings.
 - [x] Upload/download files + recursive folders.
 - [x] Queue, progress, speed, ETA, cancel token mechanics (manager side).
 - [x] Remote edit window (open, search/replace, save atomic).
