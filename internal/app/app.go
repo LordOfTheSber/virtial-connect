@@ -170,32 +170,42 @@ func formatEntry(e models.FileEntry) string {
 
 func (u *UI) onConnect() {
 	port, _ := strconv.Atoi(strings.TrimSpace(u.portEntry.Text))
+	host := strings.TrimSpace(u.hostEntry.Text)
+	user := strings.TrimSpace(u.userEntry.Text)
+	pass := u.passEntry.Text
+	key := strings.TrimSpace(u.keyEntry.Text)
+	phrase := u.ppEntry.Text
 	cfgDir, _ := os.UserConfigDir()
-	err := u.sshClient.Connect(sshclient.ConnectConfig{
-		Host: strings.TrimSpace(u.hostEntry.Text), Port: port, Username: strings.TrimSpace(u.userEntry.Text),
-		Password: u.passEntry.Text, PrivateKey: strings.TrimSpace(u.keyEntry.Text), Passphrase: u.ppEntry.Text,
-		KnownHosts: filepath.Join(cfgDir, "virtial-connect", "known_hosts"), ConnectTimout: 8 * time.Second,
-		OnUnknownHost: func(host, fp string) (bool, error) {
-			decisionCh := make(chan bool, 1)
-			u.runOnUI(func() {
-				dialog.ShowConfirm("Unknown host", fmt.Sprintf("%s fingerprint %s\nTrust this host?", host, fp), func(b bool) {
-					decisionCh <- b
-				}, u.win)
-			})
-			return <-decisionCh, nil
-		},
-	})
-	if err != nil {
-		u.logger.Error("Connect failed: %v", err)
-		dialog.ShowError(err, u.win)
-		return
-	}
-	u.logger.Info("Connected to %s", u.hostEntry.Text)
-	u.transfer = transfer.New(transfer.NewSFTPFS(u.sshClient.SFTP()), 3, func(task models.TransferTask) {
-		u.runOnUI(func() { u.upsertTask(task) })
-	})
-	u.editor = editor.New(u.sshClient.SFTP())
-	u.refreshRemote()
+
+	u.logger.Info("Connecting to %s...", host)
+	go func() {
+		err := u.sshClient.Connect(sshclient.ConnectConfig{
+			Host: host, Port: port, Username: user,
+			Password: pass, PrivateKey: key, Passphrase: phrase,
+			KnownHosts: filepath.Join(cfgDir, "virtial-connect", "known_hosts"), ConnectTimout: 8 * time.Second,
+			OnUnknownHost: func(host, fp string) (bool, error) {
+				decisionCh := make(chan bool, 1)
+				u.runOnUI(func() {
+					dialog.ShowConfirm("Unknown host", fmt.Sprintf("%s fingerprint %s\nTrust this host?", host, fp), func(b bool) {
+						decisionCh <- b
+					}, u.win)
+				})
+				return <-decisionCh, nil
+			},
+		})
+		if err != nil {
+			u.logger.Error("Connect failed: %v", err)
+			u.runOnUI(func() { dialog.ShowError(err, u.win) })
+			return
+		}
+
+		u.logger.Info("Connected to %s", host)
+		u.transfer = transfer.New(transfer.NewSFTPFS(u.sshClient.SFTP()), 3, func(task models.TransferTask) {
+			u.runOnUI(func() { u.upsertTask(task) })
+		})
+		u.editor = editor.New(u.sshClient.SFTP())
+		u.runOnUI(func() { u.refreshRemote() })
+	}()
 }
 
 func (u *UI) refreshLocal() {
