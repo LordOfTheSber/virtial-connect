@@ -89,6 +89,15 @@ go mod tidy
 go run ./cmd/virtial-connect
 ```
 
+## Troubleshooting (Windows)
+- При `go run .\cmd\virtial-connect` может долго работать `cc1.exe` (CGO-сборка зависимостей Fyne через GCC) до фактического старта окна.
+- Если окно не появляется сразу, дождитесь завершения компиляции или используйте двухшаговый запуск:
+
+```powershell
+go build -o .\bin\virtial-connect.exe .\cmd\virtial-connect
+.\bin\virtial-connect.exe
+```
+
 ## Tests
 ```bash
 go test ./...

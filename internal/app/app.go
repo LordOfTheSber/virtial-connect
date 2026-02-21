@@ -63,11 +63,17 @@ func New(a fyne.App) *UI {
 	u.logBox.Disable()
 	u.logger = logging.New(func(line string) { u.runOnUI(func() { u.logBox.SetText(u.logBox.Text + line + "\n") }) })
 	u.build()
-	u.refreshLocal()
 	return u
 }
 
-func (u *UI) Show() { u.win.ShowAndRun() }
+func (u *UI) Show() {
+	u.win.CenterOnScreen()
+	u.win.Show()
+	// Делим старт UI и потенциально долгий локальный листинг,
+	// чтобы окно гарантированно появлялось сразу.
+	u.refreshLocal()
+	u.app.Run()
+}
 
 func mustLocalHome() string {
 	h, err := os.UserHomeDir()
