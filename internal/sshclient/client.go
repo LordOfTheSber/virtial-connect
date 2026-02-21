@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -82,7 +83,7 @@ func (c *Client) hostKeyCallback(cfg ConnectConfig) (ssh.HostKeyCallback, error)
 	if cfg.KnownHosts == "" {
 		return ssh.InsecureIgnoreHostKey(), nil
 	}
-	if err := os.MkdirAll(path.Dir(cfg.KnownHosts), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cfg.KnownHosts), 0o700); err != nil {
 		return nil, err
 	}
 	if _, err := os.Stat(cfg.KnownHosts); os.IsNotExist(err) {
