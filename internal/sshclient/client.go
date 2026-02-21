@@ -231,3 +231,40 @@ func (c *Client) SFTP() *sftp.Client {
 	defer c.mu.Unlock()
 	return c.sftpClient
 }
+
+func (c *Client) RunCommand(command string, timeout time.Duration) (string, error) {
+	c.mu.Lock()
+	client := c.sshClient
+	c.mu.Unlock()
+	if client == nil {
+		return "", fmt.Errorf("not connected")
+	}
+	session, err := client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer session.Close()
+
+	type result struct {
+		output string
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, runErr := session.CombinedOutput(command)
+		done <- result{output: string(out), err: runErr}
+	}()
+
+	if timeout <= 0 {
+		res := <-done
+		return res.output, res.err
+	}
+
+	select {
+	case res := <-done:
+		return res.output, res.err
+	case <-time.After(timeout):
+		_ = session.Close()
+		return "", fmt.Errorf("command timeout after %s", timeout)
+	}
+}

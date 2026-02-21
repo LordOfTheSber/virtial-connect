@@ -60,6 +60,7 @@ README.md
 - [x] Double click on item: open directory / open file (remote opens editor, local opens via OS default app).
 - [x] Search by file/directory name in local and remote panels.
 - [x] Sorting in both panels by name and updated time.
+- [x] Remote console: execute shell commands on connected VM and view output.
 - [x] Connection profile history persisted in local settings.
 - [x] Upload/download files + recursive folders.
 - [x] Queue, progress, speed, ETA, cancel token mechanics (manager side).

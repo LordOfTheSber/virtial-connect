@@ -62,6 +62,8 @@ type UI struct {
 	remoteList *widget.List
 	logBox     *widget.Entry
 	queueList  *widget.List
+	consoleIn  *widget.Entry
+	consoleOut *widget.Entry
 	queue      []models.TransferTask
 
 	selectedLocal   int
@@ -79,6 +81,8 @@ func New(a fyne.App) *UI {
 	u.win.Resize(fyne.NewSize(1400, 900))
 	u.logBox = widget.NewMultiLineEntry()
 	u.logBox.Disable()
+	u.consoleOut = widget.NewMultiLineEntry()
+	u.consoleOut.Disable()
 	u.logger = logging.New(func(line string) { u.runOnUI(func() { u.logBox.SetText(u.logBox.Text + line + "\n") }) })
 	if st, err := config.NewStore(); err == nil {
 		u.store = st
@@ -121,6 +125,9 @@ func (u *UI) build() {
 	u.keyEntry.SetPlaceHolder("private key path")
 	u.ppEntry = widget.NewPasswordEntry()
 	u.ppEntry.SetPlaceHolder("passphrase")
+	u.consoleIn = widget.NewEntry()
+	u.consoleIn.SetPlaceHolder("Run command on remote VM, e.g. uname -a")
+	u.consoleIn.OnSubmitted = func(_ string) { u.executeRemoteCommand() }
 	u.localFind = widget.NewEntry()
 	u.localFind.SetPlaceHolder("Search local...")
 	u.localFind.OnChanged = func(_ string) { u.applyLocalFilter() }
@@ -195,7 +202,17 @@ func (u *UI) build() {
 			o.(*widget.Label).SetText(fmt.Sprintf("%s %s -> %s [%s] %d/%d speed %.1f KB/s ETA %s %s", t.ID, t.SourcePath, t.DestPath, t.Status, t.DoneBytes, t.TotalBytes, t.SpeedBps/1024, t.ETA.Truncate(time.Second), t.Error))
 		})
 
-	bottom := container.NewVSplit(container.NewBorder(widget.NewLabel("Transfer queue"), nil, nil, nil, u.queueList), container.NewBorder(widget.NewLabel("Logs"), nil, nil, nil, container.NewVScroll(u.logBox)))
+	consoleRunBtn := widget.NewButton("Run", u.executeRemoteCommand)
+	consolePanel := container.NewBorder(
+		container.NewBorder(nil, nil, nil, consoleRunBtn, u.consoleIn),
+		nil,
+		nil,
+		nil,
+		container.NewVScroll(u.consoleOut),
+	)
+	logsAndConsole := container.NewVSplit(container.NewBorder(widget.NewLabel("Logs"), nil, nil, nil, container.NewVScroll(u.logBox)), container.NewBorder(widget.NewLabel("Remote console"), nil, nil, nil, consolePanel))
+	logsAndConsole.Offset = 0.45
+	bottom := container.NewVSplit(container.NewBorder(widget.NewLabel("Transfer queue"), nil, nil, nil, u.queueList), logsAndConsole)
 	bottom.Offset = 0.45
 
 	content := container.NewBorder(conn, bottom, nil, nil, filePanels)
@@ -463,6 +480,38 @@ func (u *UI) openLocalFile(path string) {
 	if err := cmd.Start(); err != nil {
 		u.logger.Error("open local file: %v", err)
 	}
+}
+
+func (u *UI) executeRemoteCommand() {
+	cmd := strings.TrimSpace(u.consoleIn.Text)
+	if cmd == "" {
+		return
+	}
+	if !u.sshClient.IsConnected() {
+		dialog.ShowInformation("Not connected", "Connect to server first", u.win)
+		return
+	}
+	u.consoleIn.SetText("")
+	u.logger.Info("Run command: %s", cmd)
+	u.runOnUI(func() {
+		u.consoleOut.SetText(u.consoleOut.Text + "$ " + cmd + "\n")
+	})
+
+	go func(command string) {
+		output, err := u.sshClient.RunCommand(command, 20*time.Second)
+		u.runOnUI(func() {
+			if strings.TrimSpace(output) != "" {
+				u.consoleOut.SetText(u.consoleOut.Text + output)
+				if !strings.HasSuffix(u.consoleOut.Text, "\n") {
+					u.consoleOut.SetText(u.consoleOut.Text + "\n")
+				}
+			}
+			if err != nil {
+				u.consoleOut.SetText(u.consoleOut.Text + "ERROR: " + err.Error() + "\n")
+				u.logger.Error("command failed: %v", err)
+			}
+		})
+	}(cmd)
 }
 
 func normalizeSearch(s string) string {
