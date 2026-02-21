@@ -61,7 +61,7 @@ func New(a fyne.App) *UI {
 	u.win.Resize(fyne.NewSize(1400, 900))
 	u.logBox = widget.NewMultiLineEntry()
 	u.logBox.Disable()
-	u.logger = logging.New(func(line string) { u.app.Driver().RunOnMain(func() { u.logBox.SetText(u.logBox.Text + line + "\n") }) })
+	u.logger = logging.New(func(line string) { u.runOnUI(func() { u.logBox.SetText(u.logBox.Text + line + "\n") }) })
 	u.build()
 	u.refreshLocal()
 	return u
@@ -105,7 +105,6 @@ func (u *UI) build() {
 		})
 	u.localList.OnSelected = func(id widget.ListItemID) { u.selectedLocal = id }
 	u.localList.OnUnselected = func(widget.ListItemID) { u.selectedLocal = -1 }
-	u.localList.OnTappedSecondary = func(*fyne.PointEvent) { u.showLocalMenu() }
 
 	u.remoteList = widget.NewList(func() int { return len(u.remoteItems) }, func() fyne.CanvasObject { return widget.NewLabel("") },
 		func(i widget.ListItemID, o fyne.CanvasObject) {
@@ -113,7 +112,6 @@ func (u *UI) build() {
 		})
 	u.remoteList.OnSelected = func(id widget.ListItemID) { u.selectedRemote = id }
 	u.remoteList.OnUnselected = func(widget.ListItemID) { u.selectedRemote = -1 }
-	u.remoteList.OnTappedSecondary = func(*fyne.PointEvent) { u.showRemoteMenu() }
 
 	localPathLabel := widget.NewLabel("Local")
 	remotePathLabel := widget.NewLabel("Remote")
@@ -123,8 +121,19 @@ func (u *UI) build() {
 		u.refreshRemote()
 	})
 
-	localPanel := container.NewBorder(container.NewBorder(nil, nil, localPathLabel, localUp, widget.NewLabelWithStyle(u.localPath, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})), nil, nil, nil, u.localList)
-	remotePanel := container.NewBorder(container.NewBorder(nil, nil, remotePathLabel, remoteUp, widget.NewLabelWithStyle(u.remotePath, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})), nil, nil, nil, u.remoteList)
+	localActions := container.NewGridWithColumns(2,
+		widget.NewButton("Open/Up", u.showLocalMenu),
+		widget.NewButton("Upload", func() { u.uploadSelectedLocal(false) }),
+	)
+	localPanel := container.NewBorder(container.NewBorder(nil, localActions, localPathLabel, localUp, widget.NewLabelWithStyle(u.localPath, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})), nil, nil, nil, u.localList)
+	remoteActions := container.NewGridWithColumns(5,
+		widget.NewButton("Open/Up", u.showRemoteMenu),
+		widget.NewButton("Download", func() { u.downloadSelectedRemote() }),
+		widget.NewButton("Edit", func() { u.editSelectedRemote() }),
+		widget.NewButton("Rename", func() { u.renameSelectedRemote() }),
+		widget.NewButton("Delete", func() { u.deleteSelectedRemote() }),
+	)
+	remotePanel := container.NewBorder(container.NewBorder(nil, remoteActions, remotePathLabel, remoteUp, widget.NewLabelWithStyle(u.remotePath, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})), nil, nil, nil, u.remoteList)
 
 	filePanels := container.NewHSplit(localPanel, remotePanel)
 	filePanels.Offset = 0.5
@@ -161,13 +170,13 @@ func (u *UI) onConnect() {
 		Password: u.passEntry.Text, PrivateKey: strings.TrimSpace(u.keyEntry.Text), Passphrase: u.ppEntry.Text,
 		KnownHosts: filepath.Join(cfgDir, "virtial-connect", "known_hosts"), ConnectTimout: 8 * time.Second,
 		OnUnknownHost: func(host, fp string) (bool, error) {
-			ok := false
-			d := dialog.NewConfirm("Unknown host", fmt.Sprintf("%s fingerprint %s\nTrust this host?", host, fp), func(b bool) { ok = b }, u.win)
-			d.Show()
-			for d.Visible() {
-				time.Sleep(50 * time.Millisecond)
-			}
-			return ok, nil
+			decisionCh := make(chan bool, 1)
+			u.runOnUI(func() {
+				dialog.ShowConfirm("Unknown host", fmt.Sprintf("%s fingerprint %s\nTrust this host?", host, fp), func(b bool) {
+					decisionCh <- b
+				}, u.win)
+			})
+			return <-decisionCh, nil
 		},
 	})
 	if err != nil {
@@ -177,7 +186,7 @@ func (u *UI) onConnect() {
 	}
 	u.logger.Info("Connected to %s", u.hostEntry.Text)
 	u.transfer = transfer.New(transfer.NewSFTPFS(u.sshClient.SFTP()), 3, func(task models.TransferTask) {
-		u.app.Driver().RunOnMain(func() { u.upsertTask(task) })
+		u.runOnUI(func() { u.upsertTask(task) })
 	})
 	u.editor = editor.New(u.sshClient.SFTP())
 	u.refreshRemote()
@@ -256,13 +265,70 @@ func (u *UI) showRemoteMenu() {
 		u.refreshRemote()
 		return
 	}
-	menu := fyne.NewMenu("Remote",
-		fyne.NewMenuItem("Download", func() { u.enqueue(models.Download, sel.Path, filepath.Join(u.localPath, sel.Name), sel.Size) }),
-		fyne.NewMenuItem("Edit", func() { u.openEditor(sel) }),
-		fyne.NewMenuItem("Rename", func() { u.renameRemote(sel) }),
-		fyne.NewMenuItem("Delete", func() { u.deleteRemote(sel) }),
-	)
-	widget.ShowPopUpMenuAtPosition(menu, u.win.Canvas(), fyne.CurrentApp().Driver().AbsolutePositionForObject(u.remoteList))
+
+}
+
+func (u *UI) runOnUI(fn func()) {
+	if fn != nil {
+		fn()
+	}
+}
+
+func (u *UI) selectedLocalItem() (models.FileEntry, bool) {
+	if u.selectedLocal < 0 || u.selectedLocal >= len(u.localItems) {
+		return models.FileEntry{}, false
+	}
+	return u.localItems[u.selectedLocal], true
+}
+
+func (u *UI) selectedRemoteItem() (models.FileEntry, bool) {
+	if u.selectedRemote < 0 || u.selectedRemote >= len(u.remoteItems) {
+		return models.FileEntry{}, false
+	}
+	return u.remoteItems[u.selectedRemote], true
+}
+
+func (u *UI) uploadSelectedLocal(allowDir bool) {
+	sel, ok := u.selectedLocalItem()
+	if !ok || !u.sshClient.IsConnected() || sel.Name == ".." {
+		return
+	}
+	if sel.IsDir && !allowDir {
+		return
+	}
+	u.enqueue(models.Upload, sel.Path, util.JoinRemote(u.remotePath, sel.Name), sel.Size)
+}
+
+func (u *UI) downloadSelectedRemote() {
+	sel, ok := u.selectedRemoteItem()
+	if !ok || sel.Name == ".." {
+		return
+	}
+	u.enqueue(models.Download, sel.Path, filepath.Join(u.localPath, sel.Name), sel.Size)
+}
+
+func (u *UI) editSelectedRemote() {
+	sel, ok := u.selectedRemoteItem()
+	if !ok || sel.IsDir || sel.Name == ".." {
+		return
+	}
+	u.openEditor(sel)
+}
+
+func (u *UI) renameSelectedRemote() {
+	sel, ok := u.selectedRemoteItem()
+	if !ok || sel.Name == ".." {
+		return
+	}
+	u.renameRemote(sel)
+}
+
+func (u *UI) deleteSelectedRemote() {
+	sel, ok := u.selectedRemoteItem()
+	if !ok || sel.Name == ".." {
+		return
+	}
+	u.deleteRemote(sel)
 }
 
 func (u *UI) enqueue(direction models.TransferDirection, src, dst string, total int64) {
